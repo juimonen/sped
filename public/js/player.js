@@ -1,19 +1,20 @@
 'use strict'
 
-// Web Audio playback engine for sped2 EDL
-// Reads EDL regions and schedules AudioBufferSourceNodes
-// with precise timing — this is the "render" step SPED did at play time.
+// sped-e Web Audio playback engine — multitrack
+// Receives { tracks: [ { id, regions, muted, gain }, ... ] }
+// Schedules all tracks simultaneously, mixed to destination
 
 class SPEDPlayer {
   constructor() {
     this.ctx = null
-    this.sources = []       // active AudioBufferSourceNodes
-    this.bufferCache = {}   // file path → AudioBuffer
-    this.startedAt = null   // ctx.currentTime when playback started
+    this.sources = []
+    this.bufferCache = {}
+    this.startedAt = null
     this.totalDuration = 0
     this.playing = false
     this.animFrame = null
-    this.onTimeUpdate = null // callback(currentTime, totalDuration)
+    this.onTimeUpdate = null
+    this.onStatusUpdate = null
     this.onStop = null
   }
 
@@ -24,96 +25,87 @@ class SPEDPlayer {
 
   async _loadBuffer(file) {
     if (this.bufferCache[file]) return this.bufferCache[file]
-
-    const url = `/audio?file=${encodeURIComponent(file)}`
+    const url = '/audio?file=' + encodeURIComponent(file)
     const resp = await fetch(url)
-    if (!resp.ok) throw new Error(`Failed to load ${file}: ${resp.status}`)
+    if (!resp.ok) throw new Error('Failed to load ' + file + ': ' + resp.status)
     const arrayBuf = await resp.arrayBuffer()
     const audioBuf = await this.ctx.decodeAudioData(arrayBuf)
     this.bufferCache[file] = audioBuf
     return audioBuf
   }
 
-  // Fill in missing durations from actual audio file lengths
-  async resolveEDL(edl) {
-    this._ensureContext()
-    const resolved = { ...edl, regions: [] }
-
-    for (const region of edl.regions) {
-      const buf = await this._loadBuffer(region.file)
-      const duration = region.duration ?? (buf.duration - region.offset)
-      resolved.regions.push({ ...region, duration })
-    }
-
-    return resolved
-  }
-
-  async play(edl) {
+  async play(payload) {
     this.stop()
     this._ensureContext()
 
-    const resolved = await this.resolveEDL(edl)
-    this.totalDuration = resolved.regions.reduce((s, r) => s + r.duration, 0)
+    const tracks = payload.tracks || []
+    const scheduleAhead = this.ctx.currentTime + 0.1
 
-    // Schedule all regions sequentially
-    // This is the SPKitList equivalent — fire and forget, sample accurate
-    let cursor = 0
-    const scheduleAhead = this.ctx.currentTime + 0.1 // small buffer
+    // Find total duration across all unmuted tracks
+    this.totalDuration = Math.max(0, ...tracks
+      .filter(t => !t.muted)
+      .map(t => t.regions.reduce((s, r) => s + (r.duration || 0), 0))
+    )
 
-    for (const region of resolved.regions) {
-      const buf = await this._loadBuffer(region.file)
-      const src = this.ctx.createBufferSource()
-      src.buffer = buf
+    // Schedule each track
+    for (const track of tracks) {
+      if (track.muted) continue
 
-      // Fade in/out via GainNode (SPKitLinearFader equivalent)
-      const gain = this.ctx.createGain()
-      src.connect(gain)
-      gain.connect(this.ctx.destination)
+      // Track gain node for volume/mute
+      const trackGain = this.ctx.createGain()
+      trackGain.gain.value = track.gain != null ? track.gain : 1.0
+      trackGain.connect(this.ctx.destination)
 
-      const whenStart = scheduleAhead + cursor
-      const whenEnd = whenStart + region.duration
+      let cursor = 0
+      for (const region of track.regions) {
+        if (!region.duration) continue
+        const buf = await this._loadBuffer(region.file)
+        const src = this.ctx.createBufferSource()
+        src.buffer = buf
 
-      // Schedule gain envelope
-      if (region.fadeIn > 0) {
-        gain.gain.setValueAtTime(0, whenStart)
-        gain.gain.linearRampToValueAtTime(1, whenStart + region.fadeIn)
-      } else {
-        gain.gain.setValueAtTime(1, whenStart)
+        // Region gain for fades
+        const regionGain = this.ctx.createGain()
+        src.connect(regionGain)
+        regionGain.connect(trackGain)
+
+        const whenStart = scheduleAhead + cursor
+        const whenEnd = whenStart + region.duration
+
+        if (region.fadeIn > 0) {
+          regionGain.gain.setValueAtTime(0, whenStart)
+          regionGain.gain.linearRampToValueAtTime(1, whenStart + region.fadeIn)
+        } else {
+          regionGain.gain.setValueAtTime(1, whenStart)
+        }
+        if (region.fadeOut > 0) {
+          regionGain.gain.setValueAtTime(1, whenEnd - region.fadeOut)
+          regionGain.gain.linearRampToValueAtTime(0, whenEnd)
+        }
+
+        src.start(whenStart, region.offset, region.duration)
+        src.stop(whenEnd)
+
+        this.sources.push({ src, gain: regionGain, trackGain })
+        cursor += region.duration
       }
-
-      if (region.fadeOut > 0) {
-        gain.gain.setValueAtTime(1, whenEnd - region.fadeOut)
-        gain.gain.linearRampToValueAtTime(0, whenEnd)
-      }
-
-      // start(when, offset, duration)
-      src.start(whenStart, region.offset, region.duration)
-      src.stop(whenEnd)
-
-      this.sources.push({ src, gain })
-      cursor += region.duration
     }
 
     this.startedAt = this.ctx.currentTime + 0.1
     this.playing = true
     this._tick()
 
-    // Auto-stop when done
     setTimeout(() => this.stop(), (this.totalDuration + 0.5) * 1000)
   }
 
   stop() {
     this.playing = false
     cancelAnimationFrame(this.animFrame)
-
-    for (const { src, gain } of this.sources) {
+    for (const { src, gain, trackGain } of this.sources) {
       try { src.stop() } catch {}
-      src.disconnect()
-      gain.disconnect()
+      try { src.disconnect(); gain.disconnect() } catch {}
     }
     this.sources = []
     this.startedAt = null
-
     if (this.onStop) this.onStop()
   }
 
@@ -125,58 +117,62 @@ class SPEDPlayer {
   _tick() {
     if (!this.playing) return
     const t = this.currentTime()
-    if (this.onTimeUpdate) {
-      this.onTimeUpdate(t, this.totalDuration)
-    }
-    // Report position back to server so CLI can show it
-    if (this.onStatusUpdate) {
-      this.onStatusUpdate(t, this.totalDuration, true)
-    }
+    if (this.onTimeUpdate) this.onTimeUpdate(t, this.totalDuration)
+    if (this.onStatusUpdate) this.onStatusUpdate(t, this.totalDuration, true)
     this.animFrame = requestAnimationFrame(() => this._tick())
   }
 
-  // Draw timeline regions onto canvas
-  drawTimeline(canvas, edl) {
-    if (!edl || !edl.regions.length) return
+  drawTimeline(canvas, payload) {
+    if (!payload || !payload.tracks) return
     const ctx = canvas.getContext('2d')
     const w = canvas.width = canvas.offsetWidth
     const h = canvas.height = canvas.offsetHeight
-    const total = edl.regions.reduce((s, r) => s + r.duration, 0)
-
     ctx.clearRect(0, 0, w, h)
     ctx.fillStyle = '#111'
     ctx.fillRect(0, 0, w, h)
 
-    const colors = ['#1e3a4a', '#1e4a3a', '#3a1e4a', '#4a3a1e']
-    let cursor = 0
+    const tracks = payload.tracks
+    if (!tracks.length) return
 
-    edl.regions.forEach((region, i) => {
-      const x = (cursor / total) * w
-      const rw = (region.duration / total) * w
-      const color = colors[i % colors.length]
+    const total = Math.max(1, ...tracks.map(t =>
+      t.regions.reduce((s, r) => s + (r.duration || 0), 0)
+    ))
 
-      ctx.fillStyle = color
-      ctx.fillRect(x + 1, 4, rw - 2, h - 8)
+    const trackH = Math.floor((h - 4) / tracks.length)
+    const trackColors = ['#1e3a4a', '#1e4a3a', '#3a1e4a', '#4a3a1e', '#1e3a3a', '#4a1e3a']
 
-      // Fade in indicator
-      if (region.fadeIn > 0) {
-        const fw = (region.fadeIn / total) * w
-        ctx.fillStyle = 'rgba(255,255,255,0.1)'
-        ctx.beginPath()
-        ctx.moveTo(x + 1, h - 4)
-        ctx.lineTo(x + 1 + fw, 4)
-        ctx.lineTo(x + 1, 4)
-        ctx.fill()
+    tracks.forEach((track, ti) => {
+      const ty = ti * trackH + 2
+      const color = trackColors[ti % trackColors.length]
+      let cursor = 0
+
+      // Track label background
+      ctx.fillStyle = track.muted ? '#1a1a1a' : '#181818'
+      ctx.fillRect(0, ty, w, trackH - 1)
+
+      track.regions.forEach((region, ri) => {
+        if (!region.duration) return
+        const x = (cursor / total) * w
+        const rw = (region.duration / total) * w
+        ctx.fillStyle = track.muted ? '#2a2a2a' : color
+        ctx.fillRect(x + 1, ty + 1, rw - 2, trackH - 3)
+
+        if (rw > 30) {
+          ctx.fillStyle = track.muted ? '#444' : 'rgba(255,255,255,0.5)'
+          ctx.font = '9px monospace'
+          ctx.fillText('t' + track.id, x + 3, ty + trackH / 2 + 3)
+        }
+        cursor += region.duration
+      })
+
+      // Muted indicator
+      if (track.muted) {
+        ctx.fillStyle = 'rgba(255,80,80,0.3)'
+        ctx.fillRect(0, ty, w, trackH - 1)
+        ctx.fillStyle = '#f55'
+        ctx.font = '9px monospace'
+        ctx.fillText('muted', 4, ty + trackH / 2 + 3)
       }
-
-      // Region label
-      if (rw > 40) {
-        ctx.fillStyle = 'rgba(255,255,255,0.5)'
-        ctx.font = '10px monospace'
-        ctx.fillText(`${region.duration.toFixed(1)}s`, x + 4, h / 2 + 4)
-      }
-
-      cursor += region.duration
     })
 
     // Playhead

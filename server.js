@@ -140,14 +140,28 @@ function watchActiveProject() {
   let debounce = null
 
   currentWatcher = fs.watch(projectPath, (event, filename) => {
+    if (filename === 'stop.json') {
+      broadcast({ type: 'stop' })
+      return
+    }
+    // update.json: re-render without auto-play
+    if (filename === 'update.json') {
+      clearTimeout(debounce)
+      debounce = setTimeout(() => {
+        try {
+          const payload = JSON.parse(fs.readFileSync(path.join(projectPath, 'update.json'), 'utf8'))
+          broadcast({ type: 'update', payload })
+        } catch {}
+      }, 50)
+      return
+    }
+    // play.json: render and auto-play
     if (filename !== 'play.json') return
     clearTimeout(debounce)
     debounce = setTimeout(() => {
-      const signal = path.join(projectPath, 'play.json')
       try {
-        const edl = JSON.parse(fs.readFileSync(signal, 'utf8'))
-        broadcast({ type: 'edl', edl })
-        console.log(`EDL → browser (${edl.regions.length} regions) [${path.basename(projectPath)}]`)
+        const payload = JSON.parse(fs.readFileSync(path.join(projectPath, 'play.json'), 'utf8'))
+        broadcast({ type: 'edl', edl: payload })
       } catch {}
     }, 50)
   })

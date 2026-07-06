@@ -1,10 +1,10 @@
 'use strict'
 
 const player = new SPEDPlayer()
-let currentEDL = null
+let currentPayload = null  // { tracks: [...] }
 
 // ── WebSocket ──────────────────────────────────────────────
-const ws = new WebSocket(`ws://${location.host}`)
+const ws = new WebSocket('ws://' + location.host)
 const statusEl = document.getElementById('status')
 
 ws.onopen = () => {
@@ -21,27 +21,29 @@ ws.onclose = () => {
 ws.onmessage = e => {
   const msg = JSON.parse(e.data)
   if (msg.type === 'edl') {
-    currentEDL = msg.edl
-    renderEDL(msg.edl)
+    // Normalize: old single-track format or new multitrack
+    const payload = msg.edl.tracks
+      ? msg.edl
+      : { tracks: [{ id: '1', regions: msg.edl.regions, muted: false, gain: 1.0 }] }
+    currentPayload = payload
+    renderTracks(payload)
     startPlayback()
   }
   if (msg.type === 'project') {
     const name = msg.path ? msg.path.split('/').pop() : '—'
-    document.title = 'sped — ' + name
+    document.title = 'sped-e — ' + name
     statusEl.textContent = 'connected · ' + name
   }
-  if (msg.type === 'stop') {
-    player.stop()
+  if (msg.type === 'update') {
+    // Re-render timeline without auto-playing
+    const payload = msg.payload.tracks
+      ? msg.payload
+      : { tracks: [{ id: '1', regions: msg.payload.regions, muted: false, gain: 1.0 }] }
+    currentPayload = payload
+    renderTracks(payload)
   }
-  if (msg.type === 'play_region') {
-    // Play a sub-region of the EDL for monitoring
-    currentEDL = msg.edl
-    renderEDL(msg.edl)
-    startPlayback()
-  }
-  if (msg.type === 'terminal') {
-    term.write(msg.data)
-  }
+  if (msg.type === 'stop') player.stop()
+  if (msg.type === 'terminal') term.write(msg.data)
 }
 
 // ── xterm.js terminal ──────────────────────────────────────
@@ -62,27 +64,16 @@ term.loadAddon(fitAddon)
 term.open(document.getElementById('terminal'))
 fitAddon.fit()
 
-// When the server is running node-pty, terminal input goes to the shell.
-// Without node-pty (dev mode), show a helpful message.
 term.writeln('\x1b[32msped-e\x1b[0m — audio editor')
-term.writeln('\x1b[90mType sped commands in your system terminal.\x1b[0m')
-term.writeln('\x1b[90mThis panel will show shell output when node-pty is connected.\x1b[0m')
-term.writeln('')
 term.writeln('\x1b[90mQuick start:\x1b[0m')
-term.writeln('  sped init <file.wav>')
-term.writeln('  sped copy 2.0 5.0')
-term.writeln('  sped paste 10.0')
+term.writeln('  sped open ~/projects/myproject')
+term.writeln('  sped import audio.wav')
+term.writeln('  sped import other.wav 2')
 term.writeln('  sped play')
 term.writeln('')
 
-term.onData(data => {
-  ws.send(JSON.stringify({ type: 'terminal', data }))
-})
-
-term.onResize(({ cols, rows }) => {
-  ws.send(JSON.stringify({ type: 'resize', cols, rows }))
-})
-
+term.onData(data => ws.send(JSON.stringify({ type: 'terminal', data })))
+term.onResize(({ cols, rows }) => ws.send(JSON.stringify({ type: 'resize', cols, rows })))
 window.addEventListener('resize', () => fitAddon.fit())
 
 // ── Playback UI ────────────────────────────────────────────
@@ -96,15 +87,10 @@ const stopBtn = document.getElementById('stop-btn')
 function formatTime(t) {
   const m = Math.floor(t / 60)
   const s = (t % 60).toFixed(3).padStart(6, '0')
-  return `${m}:${s}`
+  return m + ':' + s
 }
 
-player.onTimeUpdate = (t, total) => {
-  timeDisplay.textContent = `${formatTime(t)} / ${formatTime(total)}`
-  player.drawTimeline(canvas, currentEDL)
-}
-
-// Report playback position to server ~4x per second
+// Status reporting to server ~4x/sec
 let lastStatusSend = 0
 player.onStatusUpdate = (t, duration, playing) => {
   const now = Date.now()
@@ -115,56 +101,72 @@ player.onStatusUpdate = (t, duration, playing) => {
   }
 }
 
+player.onTimeUpdate = (t, total) => {
+  timeDisplay.textContent = formatTime(t) + ' / ' + formatTime(total)
+  player.drawTimeline(canvas, currentPayload)
+}
+
 player.onStop = () => {
-  // Tell server playback stopped
   if (ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'playback_status', currentTime: 0, duration: 0, playing: false }))
   }
-  statusEl.textContent = 'connected'
+  statusEl.textContent = statusEl.textContent.replace('▶ playing', 'connected')
   statusEl.className = 'connected'
-  timeDisplay.textContent = currentEDL
-    ? `0:00.000 / ${formatTime(currentEDL.regions.reduce((s, r) => s + r.duration, 0))}`
-    : '0:00.000'
-  player.drawTimeline(canvas, currentEDL)
+  player.drawTimeline(canvas, currentPayload)
 }
 
 playBtn.onclick = () => startPlayback()
 stopBtn.onclick = () => player.stop()
 
 async function startPlayback() {
-  if (!currentEDL) return
+  if (!currentPayload) return
   statusEl.textContent = '▶ playing'
   statusEl.className = 'playing'
   try {
-    await player.play(currentEDL)
+    await player.play(currentPayload)
   } catch (err) {
     console.error('Playback error:', err)
-    statusEl.textContent = `error: ${err.message}`
+    statusEl.textContent = 'error: ' + err.message
     statusEl.className = ''
   }
 }
 
-function renderEDL(edl) {
+function renderTracks(payload) {
+  if (!payload || !payload.tracks || !payload.tracks.length) return
   noEdlEl.style.display = 'none'
   regionsEl.innerHTML = ''
 
-  let cursor = 0
-  edl.regions.forEach((r, i) => {
-    const div = document.createElement('div')
-    div.className = 'region'
-    const fname = r.file.split('/').pop()
-    div.innerHTML = `
-      <span class="file">${fname}</span>
-      <span class="time">offset: ${r.offset.toFixed(3)}s</span>
-      <span class="time">dur: ${r.duration?.toFixed(3) ?? '?'}s</span>
-      <span class="time">@ ${cursor.toFixed(3)}s</span>
-      ${r.fadeIn ? `<span class="time">↑${r.fadeIn}s</span>` : ''}
-      ${r.fadeOut ? `<span class="time">↓${r.fadeOut}s</span>` : ''}
-    `
-    regionsEl.appendChild(div)
-    cursor += r.duration ?? 0
+  payload.tracks.forEach(track => {
+    // Track header
+    const header = document.createElement('div')
+    header.className = 'track-header'
+    header.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 8px;background:#161616;font-size:11px;color:#666;border-bottom:1px solid #222'
+    const total = track.regions.reduce((s, r) => s + (r.duration || 0), 0)
+    header.innerHTML = '<span style="color:#4ec9b0">track ' + track.id + '</span>' +
+      '<span>' + track.regions.length + ' region(s)</span>' +
+      '<span>' + total.toFixed(3) + 's</span>' +
+      (track.muted ? '<span style="color:#f55">MUTED</span>' : '')
+    regionsEl.appendChild(header)
+
+    // Regions
+    let cursor = 0
+    track.regions.forEach((r, i) => {
+      const div = document.createElement('div')
+      div.className = 'region'
+      div.style.opacity = track.muted ? '0.4' : '1'
+      const fname = r.file.split('/').pop()
+      const dur = r.duration != null ? r.duration.toFixed(3) : '?'
+      div.innerHTML =
+        '<span class="file">' + fname + '</span>' +
+        '<span class="time">off: ' + r.offset.toFixed(3) + 's</span>' +
+        '<span class="time">dur: ' + dur + 's</span>' +
+        '<span class="time">@ ' + cursor.toFixed(3) + 's</span>' +
+        (r.fadeIn ? '<span class="time">↑' + r.fadeIn + 's</span>' : '') +
+        (r.fadeOut ? '<span class="time">↓' + r.fadeOut + 's</span>' : '')
+      regionsEl.appendChild(div)
+      cursor += r.duration || 0
+    })
   })
 
-  // Draw initial timeline
-  requestAnimationFrame(() => player.drawTimeline(canvas, edl))
+  requestAnimationFrame(() => player.drawTimeline(canvas, payload))
 }
