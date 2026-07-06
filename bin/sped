@@ -1,0 +1,287 @@
+#!/usr/bin/env node
+'use strict'
+
+const path = require('path')
+const fs = require('fs')
+const { createEDL, cut, paste, extractRegions } = require('../lib/edl')
+const { EDLStore, getActiveProject, setActiveProject } = require('../lib/store')
+
+const [,, command, ...args] = process.argv
+
+function parseTime(s) {
+  const v = parseFloat(s)
+  if (isNaN(v)) { console.error('Invalid time: ' + s); process.exit(1) }
+  return v
+}
+
+function requireStore() {
+  const store = EDLStore.fromActive()
+  if (!store) { console.error('No active project. Run: sped open <path>'); process.exit(1) }
+  return store
+}
+
+function requireEDL(store) {
+  const edl = store.read()
+  if (!edl) { console.error('Project has no EDL yet. Run: sped init <file.wav>'); process.exit(1) }
+  return edl
+}
+
+function fmt(t) {
+  const m = Math.floor(t / 60)
+  const s = (t % 60).toFixed(2).padStart(5, '0')
+  return m + ':' + s
+}
+
+switch (command) {
+
+  case 'open': {
+    const projectPath = args[0]
+    if (!projectPath) { console.error('Usage: sped open <projectpath>'); process.exit(1) }
+    const absPath = path.resolve(projectPath)
+    const existed = fs.existsSync(absPath)
+    fs.mkdirSync(absPath, { recursive: true })
+    setActiveProject(absPath)
+    if (existed && fs.existsSync(path.join(absPath, 'current'))) {
+      const store = new EDLStore(absPath)
+      const idx = store.currentIndex()
+      const edl = store.read()
+      console.log('Resumed project: ' + absPath)
+      console.log('EDL #' + idx + ' - ' + edl.regions.length + ' region(s)')
+    } else {
+      console.log('Created project: ' + absPath)
+      console.log('Now run: sped init <file.wav>')
+    }
+    break
+  }
+
+  case 'init': {
+    const store = requireStore()
+    const file = args[0]
+    if (!file) { console.error('Usage: sped init <file.wav>'); process.exit(1) }
+    const absFile = path.resolve(file)
+    if (!fs.existsSync(absFile)) { console.error('File not found: ' + absFile); process.exit(1) }
+    const { getWavDuration } = require('../lib/wavduration')
+    const duration = getWavDuration(absFile)
+    if (!duration) { console.error('Could not read WAV header from: ' + absFile); process.exit(1) }
+    const edl = createEDL(absFile, duration)
+    const idx = store.write(edl)
+    console.log('Initialized from ' + path.basename(file) + ' (' + duration.toFixed(3) + 's) -> EDL #' + idx)
+    console.log('Project: ' + getActiveProject())
+    break
+  }
+
+  case 'status': {
+    const store = requireStore()
+    const projectPath = getActiveProject()
+    const edl = requireEDL(store)
+    const idx = store.currentIndex()
+    console.log('Project: ' + projectPath)
+    console.log('EDL #' + idx + ' - ' + edl.regions.length + ' region(s)')
+    let cursor = 0
+    edl.regions.forEach((r, i) => {
+      const dur = r.duration != null ? r.duration.toFixed(3) : '?'
+      console.log('  [' + i + '] ' + path.basename(r.file) + '  offset=' + r.offset.toFixed(3) + 's  dur=' + dur + 's  @ ' + cursor.toFixed(3) + 's')
+      cursor += r.duration || 0
+    })
+    const total = edl.regions.reduce((s, r) => s + (r.duration || 0), 0)
+    console.log('  Total: ' + total.toFixed(3) + 's')
+    const cb = store.readClipboard()
+    if (cb) {
+      const cbDur = cb.reduce((s, r) => s + r.duration, 0)
+      console.log('  Clipboard: ' + cb.length + ' region(s), ' + cbDur.toFixed(3) + 's')
+    }
+    break
+  }
+
+  case 'copy': {
+    // sped copy <start> <end> [slot]
+    const start = parseTime(args[0])
+    const end = parseTime(args[1])
+    if (end <= start) { console.error('end must be > start'); process.exit(1) }
+    const slot = args[2] != null ? args[2] : '0'
+    const store = requireStore()
+    const edl = requireEDL(store)
+    const edlIndex = store.currentIndex()
+    store.writeSlot(slot, edlIndex, start, end)
+    console.log('Slot ' + slot + ': EDL #' + edlIndex + ' [' + start.toFixed(3) + 's - ' + end.toFixed(3) + 's] (' + (end-start).toFixed(3) + 's)')
+    break
+  }
+
+  case 'cut': {
+    const start = parseTime(args[0])
+    const end = parseTime(args[1])
+    if (end <= start) { console.error('end must be > start'); process.exit(1) }
+    const store = requireStore()
+    const edl = requireEDL(store)
+    const clipped = extractRegions(edl.regions, start, end)
+    store.writeClipboard(clipped)
+    const newRegions = cut(edl.regions, start, end)
+    const idx = store.write({ ...edl, regions: newRegions })
+    console.log('Cut ' + (end - start).toFixed(3) + 's -> EDL #' + idx)
+    break
+  }
+
+  case 'paste': {
+    const t = parseTime(args[0])
+    const store = requireStore()
+    const edl = requireEDL(store)
+    const clipboard = store.readClipboard()
+    if (!clipboard) { console.error('Clipboard empty. Use copy or cut first.'); process.exit(1) }
+    const newRegions = paste(edl.regions, clipboard, t)
+    const idx = store.write({ ...edl, regions: newRegions })
+    const dur = clipboard.reduce((s, r) => s + r.duration, 0)
+    console.log('Pasted ' + dur.toFixed(3) + 's at ' + t.toFixed(3) + 's -> EDL #' + idx)
+    break
+  }
+
+  case 'slots': {
+    // Show all copy slots
+    const store = requireStore()
+    const slots = store.listSlots()
+    if (slots.length === 0) {
+      console.log('No slots. Use: sped copy <start> <end> [slot]')
+    } else {
+      console.log('Copy slots:')
+      slots.forEach(s => {
+        console.log('  [' + s.slot + '] EDL #' + s.edlIndex + '  ' + s.start.toFixed(3) + 's - ' + s.end.toFixed(3) + 's  (' + (s.end - s.start).toFixed(3) + 's)')
+      })
+    }
+    break
+  }
+
+  case 'join': {
+    // sped join <slot> [slot] [slot] ...
+    // Builds a new EDL by concatenating resolved slot regions in given order
+    if (args.length === 0) { console.error('Usage: sped join <slot> [slot...]'); process.exit(1) }
+    const store = requireStore()
+    const edl = requireEDL(store)
+
+    const newRegions = []
+    for (const slot of args) {
+      const regions = store.resolveSlot(slot)
+      if (!regions) {
+        console.error('Slot ' + slot + ' not found. Run: sped copy <start> <end> ' + slot)
+        process.exit(1)
+      }
+      newRegions.push(...regions)
+      console.log('  slot ' + slot + ': ' + regions.length + ' region(s), ' + regions.reduce((s,r) => s+r.duration, 0).toFixed(3) + 's')
+    }
+
+    const idx = store.write({ ...edl, regions: newRegions })
+    const total = newRegions.reduce((s, r) => s + r.duration, 0)
+    console.log('Joined ' + args.length + ' slot(s) -> ' + total.toFixed(3) + 's -> EDL #' + idx)
+    break
+  }
+
+  case 'undo': {
+    const store = requireStore()
+    if (store.undo()) {
+      const edl = store.read()
+      const idx = store.currentIndex()
+      console.log('Undo -> EDL #' + idx + ' (' + edl.regions.length + ' region(s))')
+    }
+    break
+  }
+
+  case 'play': {
+    const store = requireStore()
+    const edl = requireEDL(store)
+
+    // Optional region: sped play [start] [end]
+    let playEdl = edl
+    const startTime = args[0] != null ? parseTime(args[0]) : null
+    const endTime   = args[1] != null ? parseTime(args[1]) : null
+
+    if (startTime != null || endTime != null) {
+      const total = edl.regions.reduce((s, r) => s + (r.duration || 0), 0)
+      const s = startTime != null ? startTime : 0
+      const e = endTime   != null ? endTime   : total
+      const regions = extractRegions(edl.regions, s, e)
+      playEdl = { ...edl, regions, _playRegion: [s, e] }
+    }
+
+    store.signalPlay(playEdl)
+
+    const statusPath = path.join(store.dir, 'playback_status.json')
+    const totalDur = playEdl.regions.reduce((s, r) => s + (r.duration || 0), 0)
+
+    // Clear stale status
+    if (fs.existsSync(statusPath)) fs.unlinkSync(statusPath)
+
+    process.stdout.write('\r\u25b6 0:00.00 / ' + fmt(totalDur) + '  [Ctrl+C to stop]')
+
+    // Use wall clock as primary timer, browser status as optional refinement
+    const startedAt = Date.now()
+    const poll = setInterval(() => {
+      // Try browser status first, fall back to wall clock
+      let currentTime
+      try {
+        const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'))
+        if (Date.now() - status.ts < 2000) {
+          currentTime = status.currentTime
+          if (!status.playing && status.currentTime > 0) {
+            clearInterval(poll)
+            process.stdout.write('\n')
+            process.exit(0)
+          }
+        }
+      } catch (e) {}
+      if (currentTime == null) {
+        currentTime = (Date.now() - startedAt) / 1000
+      }
+      process.stdout.write('\r\u25b6 ' + fmt(currentTime) + ' / ' + fmt(totalDur) + '  [Ctrl+C to stop]')
+      if (currentTime >= totalDur - 0.1) {
+        clearInterval(poll)
+        process.stdout.write('\n')
+        process.exit(0)
+      }
+    }, 100)
+
+    process.on('SIGINT', () => {
+      clearInterval(poll)
+      // Hit the stop endpoint on the server
+      const http = require('http')
+      const req = http.get('http://localhost:3000/stop', () => {})
+      req.on('error', () => {})
+      process.stdout.write('\n')
+      setTimeout(() => process.exit(0), 100)
+    })
+
+    break
+  }
+
+  case 'active': {
+    const active = getActiveProject()
+    if (active) {
+      console.log('Active project: ' + active)
+    } else {
+      console.log('No active project. Run: sped open <path>')
+    }
+    break
+  }
+
+  case 'help':
+  default: {
+    console.log([
+      'sped - non-destructive audio editor',
+      '',
+      '  sped open <path>          open or create a project folder',
+      '  sped init <file.wav>      set source audio for current project',
+      '  sped status               show current EDL',
+      '  sped copy <start> <end> [slot]  copy section to slot (default slot 0)',
+      '  sped slots                       list all copy slots',
+      '  sped join <slot> [slot...]        build new EDL from slots in order',
+      '  sped cut  <start> <end>          cut section out',
+      '  sped paste <t>                   paste slot 0 at timeline position',
+      '  sped undo                        revert to previous EDL',
+      '  sped play                 play whole EDL (blocks, Ctrl+C to stop)',
+      '  sped play <start> <end>   play a region',
+      '  sped play <start>         play from start to end',
+      '  sped active               show current active project',
+      '',
+      'All times in seconds.',
+      'Projects are self-contained folders - copy or move them freely.',
+    ].join('\n'))
+    break
+  }
+}
