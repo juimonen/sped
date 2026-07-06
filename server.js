@@ -9,7 +9,8 @@ const os = require('os')
 
 let pty
 try {
-  pty = require('node-pty')
+  // Try local node_modules first (Docker), then regular require
+  try { pty = require('/app/node_modules/node-pty') } catch { pty = require('node-pty') }
 } catch {
   console.warn('node-pty not available — shell panel disabled')
 }
@@ -53,20 +54,37 @@ app.get('/audio', (req, res) => {
 
 const clients = new Set()
 
+let shutdownTimer = null
+
+function scheduleShutdown() {
+  if (clients.size > 0) return
+  shutdownTimer = setTimeout(() => {
+    if (clients.size === 0) {
+      console.log('No clients — shutting down')
+      process.exit(0)
+    }
+  }, 2000)
+}
+
 wss.on('connection', ws => {
   clients.add(ws)
+  clearTimeout(shutdownTimer)
+  shutdownTimer = null
   console.log('Browser connected')
+  ws.on('error', e => console.error('WS error:', e.message))
 
   // Spawn a real shell
   let shell = null
   if (pty) {
-    shell = pty.spawn(process.env.SHELL || 'bash', [], {
+    try {
+    shell = pty.spawn(process.env.SHELL || '/bin/bash', [], {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
       cwd: process.env.HOME || process.cwd(),
       env: {
         ...process.env,
+        PS1: 'sped> ',
         PATH: `${path.join(__dirname, 'bin')}:${process.env.PATH}`
       }
     })
@@ -80,22 +98,35 @@ wss.on('connection', ws => {
     })
 
     console.log(`Shell spawned (pid ${shell.pid})`)
+    } catch (e) {
+      console.error('Failed to spawn shell:', e.message)
+      ws.send(JSON.stringify({ type: 'terminal', data: '\r\n[shell error: ' + e.message + ']\r\n' }))
+      shell = null
+    }
   } else {
     ws.send(JSON.stringify({ type: 'terminal', data: '\r\nnode-pty not available. Use your system terminal.\r\n' }))
   }
 
-  // Send current EDL if a project is active
-  const signal = getPlaySignal()
-  if (signal && fs.existsSync(signal)) {
-    try {
-      const edl = JSON.parse(fs.readFileSync(signal, 'utf8'))
-      ws.send(JSON.stringify({ type: 'edl', edl }))
-    } catch {}
+  // Send current state as update (no autoplay) if a project is active
+  const projectPath = getActiveProject()
+  if (projectPath) {
+    const updatePath = path.join(projectPath, 'update.json')
+    const playPath = path.join(projectPath, 'play.json')
+    const statePath = updatePath + '' // prefer update.json, fall back to play.json
+    const filePath = fs.existsSync(updatePath) ? updatePath : 
+                     fs.existsSync(playPath) ? playPath : null
+    if (filePath) {
+      try {
+        const payload = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+        ws.send(JSON.stringify({ type: 'update', payload }))
+      } catch {}
+    }
   }
 
   ws.on('close', () => {
     clients.delete(ws)
     if (shell) try { shell.kill() } catch {}
+    scheduleShutdown()
   })
 
   ws.on('message', msg => {
@@ -183,9 +214,11 @@ fs.watch(GLOBAL_DIR, (event, filename) => {
 // Start watching whatever project is currently active
 watchActiveProject()
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`sped server at http://localhost:${PORT}`)
-  const open = process.platform === 'darwin' ? 'open' :
-               process.platform === 'win32' ? 'start' : 'xdg-open'
-  require('child_process').exec(`${open} http://localhost:${PORT}`)
+  if (!process.env.DOCKER) {
+    const open = process.platform === 'darwin' ? 'open' :
+                 process.platform === 'win32' ? 'start' : 'xdg-open'
+    require('child_process').exec(`${open} http://localhost:${PORT}`)
+  }
 })
