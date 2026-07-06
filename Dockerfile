@@ -7,14 +7,15 @@ COPY . .
 RUN node -e "require('/app/node_modules/node-pty'); console.log('node-pty OK')"
 RUN npm link
 
-# Set a friendly prompt
-RUN echo "export PS1='sped> '" >> /etc/profile
-RUN echo "export PS1='sped> '" >> /root/.bashrc
-RUN echo '[ -f /etc/profile ] && . /etc/profile' >> /root/.bash_profile
-
 ENV HOME=/workspace
 ENV DOCKER=1
 ENV SHELL=/bin/bash
+
+# Make workspace writable by anyone so host user can write to mounted volume
+RUN mkdir -p /workspace && chmod 777 /workspace
+
 WORKDIR /workspace
 EXPOSE 3000
-CMD ["node", "/app/server.js"]
+RUN printf '#!/bin/sh\numask 000\nexec node /app/server.js\n' > /start.sh && chmod +x /start.sh
+CMD ["/start.sh"]
+

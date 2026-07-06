@@ -1,12 +1,15 @@
 #!/bin/bash
 SPED_DIR="$HOME/sped"
-mkdir -p "$SPED_DIR/audio" "$SPED_DIR/projects"
+mkdir -p "$SPED_DIR/projects"
 
 docker stop sped-e 2>/dev/null
 
 echo "sped-e starting..."
-echo "Audio:    $SPED_DIR/audio"
-echo "Projects: $SPED_DIR/projects"
+echo "Projects: $SPED_DIR/projects/"
+echo ""
+echo "To add audio to a project:"
+echo "  cp myfile.wav $SPED_DIR/projects/<name>/audio/"
+echo ""
 
 docker run --rm -d \
   --name sped-e \
@@ -15,9 +18,9 @@ docker run --rm -d \
   sped > /dev/null
 
 sleep 1
-
-# Open browser completely detached from terminal
 nohup sh -c 'open http://localhost:3000 2>/dev/null || xdg-open http://localhost:3000 2>/dev/null' \
   > /dev/null 2>&1 &
+disown
 
-echo "Running. To stop: docker stop sped-e"
+echo "Running at http://localhost:3000"
+echo "To stop: docker stop sped-e"

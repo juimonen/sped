@@ -122,6 +122,52 @@ class SPEDPlayer {
     this.animFrame = requestAnimationFrame(() => this._tick())
   }
 
+  // Draw a single track on its own canvas
+  drawTrack(canvas, track, currentTime, payload) {
+    const ctx = canvas.getContext('2d')
+    const w = canvas.width = canvas.offsetWidth
+    const h = canvas.height = canvas.offsetHeight
+    ctx.clearRect(0, 0, w, h)
+    ctx.fillStyle = '#111'
+    ctx.fillRect(0, 0, w, h)
+
+    if (!track || !track.regions.length) return
+
+    // Total duration is max across all tracks for consistent scale
+    const total = payload
+      ? Math.max(1, ...payload.tracks.map(t => t.regions.reduce((s, r) => s + (r.duration || 0), 0)))
+      : Math.max(1, track.regions.reduce((s, r) => s + (r.duration || 0), 0))
+
+    const colors = ['#1e3a4a', '#1e4a3a', '#3a1e4a', '#4a3a1e', '#1e3a3a']
+    const color = colors[parseInt(track.id) % colors.length]
+
+    let cursor = 0
+    track.regions.forEach((region, ri) => {
+      if (!region.duration) return
+      const x = (cursor / total) * w
+      const rw = (region.duration / total) * w
+      ctx.fillStyle = track.muted ? '#2a2a2a' : color
+      ctx.fillRect(x + 1, 2, rw - 2, h - 4)
+      if (rw > 20) {
+        ctx.fillStyle = track.muted ? '#444' : 'rgba(255,255,255,0.4)'
+        ctx.font = '9px monospace'
+        ctx.fillText(region.duration.toFixed(1) + 's', x + 3, h / 2 + 3)
+      }
+      cursor += region.duration
+    })
+
+    // Playhead
+    if (this.playing && currentTime > 0) {
+      const px = (currentTime / total) * w
+      ctx.strokeStyle = '#4ec9b0'
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.moveTo(px, 0)
+      ctx.lineTo(px, h)
+      ctx.stroke()
+    }
+  }
+
   drawTimeline(canvas, payload) {
     if (!payload || !payload.tracks) return
     const ctx = canvas.getContext('2d')
@@ -138,7 +184,7 @@ class SPEDPlayer {
       t.regions.reduce((s, r) => s + (r.duration || 0), 0)
     ))
 
-    const trackH = Math.floor((h - 4) / tracks.length)
+    const trackH = Math.min(Math.floor((h - 4) / tracks.length), 40)
     const trackColors = ['#1e3a4a', '#1e4a3a', '#3a1e4a', '#4a3a1e', '#1e3a3a', '#4a1e3a']
 
     tracks.forEach((track, ti) => {

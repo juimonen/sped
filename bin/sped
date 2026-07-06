@@ -58,19 +58,29 @@ function update(projectPath) {
 switch (command) {
 
   case 'open': {
-    const projectPath = args[0]
-    if (!projectPath) { console.error('Usage: sped open <path>'); process.exit(1) }
-    const absPath = path.resolve(projectPath)
-    const existed = fs.existsSync(absPath)
+    const projectName = args[0]
+    if (!projectName) { console.error('Usage: sped open <projectname>'); process.exit(1) }
+    // Always create under /workspace/projects/
+    const absPath = path.join('/workspace/projects', projectName)
+    const audioDir = path.join(absPath, 'audio')
+    const existed = fs.existsSync(absPath) && listTracks(absPath).length > 0
     fs.mkdirSync(absPath, { recursive: true })
+    fs.mkdirSync(audioDir, { recursive: true })
     setActiveProject(absPath)
-    if (existed && listTracks(absPath).length > 0) {
+    const hostAudioPath = '~/sped/projects/' + projectName + '/audio/'
+    if (existed) {
       const tracks = listTracks(absPath)
-      console.log('Resumed project: ' + absPath)
-      console.log('Tracks: ' + tracks.join(', ') + '  (active: ' + getActiveTrack(absPath) + ')')
+      const audioFiles = fs.readdirSync(audioDir).filter(f => f.match(/\.(wav|mp3|flac|aiff|ogg)$/i))
+      console.log('Resumed: ' + projectName)
+      console.log('Audio:   ' + hostAudioPath + ' (' + audioFiles.length + ' file(s))')
+      if (tracks.length) console.log('Tracks:  ' + tracks.join(', ') + '  (active: ' + getActiveTrack(absPath) + ')')
     } else {
-      console.log('Created project: ' + absPath)
-      console.log('Now run: sped import <file.wav>')
+      console.log('Created: ' + projectName)
+      console.log('')
+      console.log('sped can only see ~/sped/ — copy audio from outside sped:')
+      console.log('  cp yourfile.wav ' + hostAudioPath)
+      console.log('')
+      console.log('Then come back and run: sped import <file.wav>')
     }
     break
   }
@@ -80,8 +90,14 @@ switch (command) {
     const projectPath = requireProject()
     const file = args[0]
     if (!file) { console.error('Usage: sped import <file.wav> [track] [start|end|<t>]'); process.exit(1) }
-    const absFile = path.resolve(file)
-    if (!fs.existsSync(absFile)) { console.error('File not found: ' + absFile); process.exit(1) }
+    // Look in project audio/ dir first, then absolute path
+    const audioFile = path.join(projectPath, 'audio', file)
+    const absFile = fs.existsSync(audioFile) ? audioFile : path.resolve(file)
+    if (!fs.existsSync(absFile)) {
+      console.error('File not found: ' + file)
+      console.error('Copy it to projects/' + path.basename(projectPath) + '/audio/ first')
+      process.exit(1)
+    }
 
     const { getWavDuration } = require('../lib/wavduration')
     const duration = getWavDuration(absFile)
@@ -202,11 +218,25 @@ switch (command) {
 
   case 'status': {
     const projectPath = requireProject()
-    const active = getActiveTrack(projectPath)
+    const projectName = path.basename(projectPath)
     const { store, trackId } = requireStore(projectPath)
     const edl = requireEDL(store)
     const idx = store.currentIndex()
-    console.log('Project: ' + projectPath + '  (track ' + trackId + ' active)')
+
+    // Audio folder
+    const audioDir = path.join(projectPath, 'audio')
+    const audioFiles = fs.existsSync(audioDir)
+      ? fs.readdirSync(audioDir).filter(f => f.match(/\.(wav|mp3|flac|aiff|ogg)$/i))
+      : []
+    const hostAudioPath = '~/sped/projects/' + projectName + '/audio/'
+
+    console.log('Project: ' + projectName + '  (track ' + trackId + ' active)')
+    console.log('Audio:   ' + hostAudioPath)
+    if (audioFiles.length) {
+      audioFiles.forEach(f => console.log('  ' + f))
+    } else {
+      console.log('  (empty — copy WAV files here)')
+    }
     console.log('EDL #' + idx + ' - ' + edl.regions.length + ' region(s)')
     let cursor = 0
     edl.regions.forEach((r, i) => {
