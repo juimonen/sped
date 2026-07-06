@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Editor backup files
+*.~
+**/*.~
+
+# sped config
+.sped/
+.sped-e/
+.sped2/
+
+# Project data (user specific)
+.sped2/
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+*.log
