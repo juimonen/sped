@@ -7,11 +7,9 @@ node_modules/
 
 # sped config
 .sped/
-.sped-e/
-.sped2/
 
 # Project data (user specific)
-.sped2/
+.sped/
 
 # Docker
 .dockerignore
