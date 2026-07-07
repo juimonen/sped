@@ -1,13 +1,17 @@
 # sped-e — Sound Processing Editor Enhanced
 
-A non-destructive multitrack audio editor with a browser-based interface and command-line editing workflow. Work is done entirely through shell commands; the browser provides real-time visualization and Web Audio playback.
+A command-line audio editor in the Unix tradition. All editing is done through shell commands — cut, paste, copy, join — operating on edit decision lists (EDLs) stored as JSON. No audio is ever processed at edit time; the EDL is the only artifact that matters until you say `sped play`.
+
+The central design idea, inherited from the original SPED, is that the EDL and the audio processing graph are the same structure. A region in the EDL directly maps to an audio source node; a sequence of regions maps to a processing chain. This makes the editor naturally scriptable — any shell script that can manipulate text can drive an editing session.
+
+The browser is not the editor. It serves two purposes: it gives the Unix shell to users on any operating system via a WebSocket-connected terminal, and it provides a Web Audio runtime for playback. You could use sped-e entirely from the command line without ever looking at the browser window.
 
 sped-e is a modern reimplementation of ideas from the original SPED (Sound Processing Kit Editor), presented at ICMC 2007:
 
 > Uimonen, J. (2007). *SPED – A Sound File Editor*. Proceedings of the International Computer Music Conference 2007.
 > http://hdl.handle.net/2027/spo.bbp2372.2007.094
 
-The original SPED used XML-based edit decision lists and the SPKit C++ signal processing framework. sped-e brings the same non-destructive EDL concept to the browser using Web Audio API, with multitrack support and a Docker-based distribution model.
+The original SPED used XML-based edit decision lists and the SPKit C++ signal processing framework. sped-e replaces SPKit with the Web Audio API and XML with JSON, but keeps the same non-destructive, command-driven editing model — now with multitrack support and a Docker-based distribution that runs identically on Linux, Mac, and Windows.
 
 ---
 
@@ -15,15 +19,13 @@ The original SPED used XML-based edit decision lists and the SPKit C++ signal pr
 
 - Docker
 
-That's it. No Node.js, npm, or audio libraries needed on the host.
-
 ---
 
 ## Building the Docker image
 
 ```bash
-git clone https://github.com/jauimone/sped.git
-cd sped
+git clone https://github.com/jauimone/sped-e.git
+cd sped-e
 docker build -t sped .
 ```
 
