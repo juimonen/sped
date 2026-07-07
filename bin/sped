@@ -279,16 +279,18 @@ switch (command) {
   }
 
   case 'paste': {
+    // sped paste <t> [slot]  — pastes slot (default 0) at timeline position t
     const t = parseTime(args[0])
+    const slot = args[1] != null ? args[1] : '0'
     const projectPath = requireProject()
     const { store } = requireStore(projectPath)
     const edl = requireEDL(store)
-    const clipboard = store.readClipboard()
-    if (!clipboard) { console.error('Clipboard empty.'); process.exit(1) }
-    const newRegions = paste(edl.regions, clipboard, t)
+    const regions = store.resolveSlot(slot)
+    if (!regions) { console.error('Slot ' + slot + ' is empty. Use: sped copy <start> <end> [slot]'); process.exit(1) }
+    const newRegions = paste(edl.regions, regions, t)
     const idx = store.write({ ...edl, regions: newRegions })
-    const dur = clipboard.reduce((s, r) => s + r.duration, 0)
-    console.log('Pasted ' + dur.toFixed(3) + 's at ' + t.toFixed(3) + 's -> EDL #' + idx)
+    const dur = regions.reduce((s, r) => s + r.duration, 0)
+    console.log('Pasted slot ' + slot + ' (' + dur.toFixed(3) + 's) at ' + t.toFixed(3) + 's -> EDL #' + idx)
     update(projectPath)
     break
   }
@@ -338,30 +340,43 @@ switch (command) {
   case 'play': {
     const projectPath = requireProject()
 
-    // Optional region filter for active track
-    const startTime = args[0] != null ? parseTime(args[0]) : null
-    const endTime   = args[1] != null ? parseTime(args[1]) : null
+    let payload
+    let totalDur
 
-    let payload = buildPlayPayload(projectPath)
+    // sped play slot <n> — audition a slot
+    if (args[0] === 'slot') {
+      const slotId = args[1] != null ? args[1] : '0'
+      const { store: s } = requireStore(projectPath)
+      const regions = s.resolveSlot(slotId)
+      if (!regions) { console.error('Slot ' + slotId + ' is empty.'); process.exit(1) }
+      totalDur = regions.reduce((sum, r) => sum + (r.duration || 0), 0)
+      payload = { tracks: [{ id: 'slot', regions, muted: false, gain: 1.0 }] }
+      console.log('Playing slot ' + slotId + ' (' + totalDur.toFixed(3) + 's)')
+    } else {
+      // Optional region filter for active track
+      const startTime = args[0] != null ? parseTime(args[0]) : null
+      const endTime   = args[1] != null ? parseTime(args[1]) : null
 
-    // If region specified, filter active track to that region
-    if (startTime != null || endTime != null) {
-      const activeTrack = getActiveTrack(projectPath)
-      payload.tracks = payload.tracks.map(t => {
-        if (t.id !== activeTrack) return t
-        const total = t.regions.reduce((s, r) => s + (r.duration || 0), 0)
-        const s = startTime != null ? startTime : 0
-        const e = endTime   != null ? endTime   : total
-        return { ...t, regions: extractRegions(t.regions, s, e) }
-      })
+      payload = buildPlayPayload(projectPath)
+
+      if (startTime != null || endTime != null) {
+        const activeTrack = getActiveTrack(projectPath)
+        payload.tracks = payload.tracks.map(t => {
+          if (t.id !== activeTrack) return t
+          const total = t.regions.reduce((s, r) => s + (r.duration || 0), 0)
+          const s = startTime != null ? startTime : 0
+          const e = endTime   != null ? endTime   : total
+          return { ...t, regions: extractRegions(t.regions, s, e) }
+        })
+      }
+
+      totalDur = Math.max(0, ...payload.tracks.map(t =>
+        t.muted ? 0 : t.regions.reduce((s, r) => s + (r.duration || 0), 0)
+      ))
     }
 
     const signalPath = path.join(projectPath, 'play.json')
     fs.writeFileSync(signalPath, JSON.stringify(payload, null, 2))
-
-    const totalDur = Math.max(...payload.tracks.map(t =>
-      t.muted ? 0 : t.regions.reduce((s, r) => s + (r.duration || 0), 0)
-    ))
 
     const statusPath = path.join(projectPath, 'playback_status.json')
     if (fs.existsSync(statusPath)) fs.unlinkSync(statusPath)
@@ -408,7 +423,7 @@ switch (command) {
     console.log([
       'sped-e — non-destructive multitrack audio editor',
       '',
-      '  sped open <path>                open or create a project',
+      '  sped open <name>               open or create a project in projects/<name>',
       '  sped import <file> [track] [start|end|<t>]  import audio to track',
       '  sped track                      show active track',
       '  sped track <id>                 set active track',
@@ -427,6 +442,7 @@ switch (command) {
       '  sped undo                       revert active track EDL',
       '',
       '  sped play                       play all tracks mixed',
+      '  sped play slot <n>              audition a copy slot',
       '  sped play <start> <end>         play region of active track',
       '  sped active                     show active project',
       '',
