@@ -4,7 +4,7 @@ const player = new SPEDPlayer()
 let currentPayload = null  // { tracks: [...] }
 
 // ── WebSocket ──────────────────────────────────────────────
-const ws = new WebSocket('ws://' + location.host)
+const ws = new WebSocket('ws://' + location.host + '/ws')
 const statusEl = document.getElementById('status')
 
 ws.onopen = () => {
