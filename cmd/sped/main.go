@@ -982,6 +982,7 @@ func cmdHelp(args []string) {
   sped play                      play all tracks mixed (Ctrl+C to stop)
   sped play slot <n>             audition a copy slot
   sped play <start> <end>        play a region
+  sped export [output.wav]       render all tracks to WAV file
   sped active                    show active project
 
 All times in seconds.`)
@@ -1038,6 +1039,8 @@ func main() {
 		cmdUnsolo(rest)
 	case "play":
 		cmdPlay(rest)
+	case "export":
+		cmdExport(rest)
 	case "active":
 		cmdActive(rest)
 	case "help", "--help", "-h":

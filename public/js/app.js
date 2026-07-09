@@ -140,6 +140,30 @@ player.onStop = () => {
 playBtn.onclick = () => startPlayback()
 stopBtn.onclick = () => player.stop()
 
+const exportBtn = document.getElementById('export-btn')
+const exportStatus = document.getElementById('export-status')
+const exporter = new SPEDExporter()
+
+exportBtn.onclick = async () => {
+  if (!currentPayload) { exportStatus.textContent = 'no project loaded'; return }
+  exportBtn.disabled = true
+  exportBtn.textContent = '⏳ rendering...'
+  exportStatus.textContent = ''
+  try {
+    const duration = await exporter.export(currentPayload, (msg, progress) => {
+      exportBtn.textContent = '⏳ ' + msg
+    })
+    exportBtn.textContent = '⬇ export wav'
+    exportStatus.textContent = 'done (' + duration.toFixed(1) + 's)'
+    setTimeout(() => { exportStatus.textContent = '' }, 4000)
+  } catch (err) {
+    exportBtn.textContent = '⬇ export wav'
+    exportStatus.textContent = 'error: ' + err.message
+    console.error('Export error:', err)
+  }
+  exportBtn.disabled = false
+}
+
 async function startPlayback() {
   if (!currentPayload) return
   statusEl.textContent = '▶ playing'
