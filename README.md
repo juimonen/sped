@@ -19,6 +19,8 @@ The original SPED used XML-based edit decision lists and the SPKit C++ signal pr
 
 - Docker
 
+That's it. No Node.js, npm, or audio libraries needed on the host.
+
 ---
 
 ## Building the Docker image
@@ -29,7 +31,7 @@ cd sped-e
 docker build -t sped .
 ```
 
-The build compiles node-pty from source inside the Alpine container — this takes a few minutes the first time.
+The build compiles two Go binaries inside an Alpine container — this takes a minute or two the first time, and is fast on subsequent builds due to layer caching.
 
 ---
 
@@ -163,10 +165,12 @@ Projects can be copied or moved freely — all paths inside EDL files are absolu
 
 sped-e separates editing from playback:
 
-- **Shell commands** manipulate JSON edit decision lists (EDLs) on disk — no audio processing at edit time
+- **Shell commands** (`sped`) manipulate JSON edit decision lists (EDLs) on disk — no audio processing at edit time
 - **`sped play`** sends the current EDL to the browser over WebSocket
 - **Browser** instantiates a Web Audio graph from the EDL and plays it — `AudioBufferSourceNode` per region, scheduled with sample-accurate timing
 - The right panel visualizes the EDL, Web Audio node graph, and timeline for each track
+
+The server (`sped-server`) and CLI (`sped`) are both compiled Go binaries — no runtime dependencies. The Docker image is ~20MB total.
 
 This is the same architecture as the original SPED: the EDL is the primary artifact, and the audio engine is only invoked at play time.
 
